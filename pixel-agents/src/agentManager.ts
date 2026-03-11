@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 
 import {
   JSONL_POLL_INTERVAL_MS,
+  SETTING_CLAUDE_PATH,
   TERMINAL_NAME_PREFIX,
   WORKSPACE_KEY_AGENT_SEATS,
   WORKSPACE_KEY_AGENTS,
@@ -13,6 +14,28 @@ import { ensureProjectScan, readNewLines, startFileWatching } from './fileWatche
 import { migrateAndLoadLayout } from './layoutPersistence.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
 import type { AgentState, PersistedAgent } from './types.js';
+
+function resolveClaudePath(): string {
+  const config = vscode.workspace.getConfiguration();
+  const configuredPath = config.get<string>(SETTING_CLAUDE_PATH, '');
+  if (configuredPath.trim()) {
+    return configuredPath.trim();
+  }
+
+  const commonPaths = [
+    '/usr/local/bin/claude',
+    path.join(os.homedir(), '.npm', 'bin', 'claude'),
+    path.join(os.homedir(), '.local', 'bin', 'claude'),
+    '/opt/homebrew/bin/claude',
+  ];
+  for (const p of commonPaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+
+  return 'claude';
+}
 
 export function getProjectDirPath(cwd?: string): string | null {
   const workspacePath = cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -50,7 +73,8 @@ export async function launchNewTerminal(
   terminal.show();
 
   const sessionId = crypto.randomUUID();
-  terminal.sendText(`claude --session-id ${sessionId}`);
+  const claudeBin = resolveClaudePath();
+  terminal.sendText(`${claudeBin} --session-id ${sessionId}`);
 
   const projectDir = getProjectDirPath(cwd);
   if (!projectDir) {

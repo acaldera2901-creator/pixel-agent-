@@ -46,6 +46,16 @@
           "name": "Pixel Agents"
         }
       ]
+    },
+    "configuration": {
+      "title": "Pixel Agents",
+      "properties": {
+        "pixel-agents.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude CLI binary. Leave empty to auto-detect (searches /usr/local/bin, /opt/homebrew/bin, ~/.npm/bin, etc.)."
+        }
+      }
     }
   },
   "scripts": {
