@@ -1,20 +1,18 @@
 /**
  * codeAgent — sub-agent for code analysis, generation, and explanation.
+ * Uses the configured AI provider with code-related tools.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import { TranscriptWriter } from "../transcript.js";
-import { v4 as uuidv4 } from "uuid";
+import { AIProvider, ToolDefinition } from "../providers/index.js";
 
-const client = new Anthropic();
-
-const CODE_TOOLS: Anthropic.Tool[] = [
+const CODE_TOOLS: ToolDefinition[] = [
   {
     name: "analyze_code",
     description:
       "Analyse a code snippet for bugs, quality issues, and improvements",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         code: { type: "string", description: "The code to analyse" },
         language: {
@@ -29,7 +27,7 @@ const CODE_TOOLS: Anthropic.Tool[] = [
     name: "generate_code",
     description: "Generate code based on a description",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         description: {
           type: "string",
@@ -47,7 +45,7 @@ const CODE_TOOLS: Anthropic.Tool[] = [
     name: "explain_code",
     description: "Explain what a piece of code does in plain language",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         code: { type: "string", description: "Code to explain" },
       },
@@ -56,16 +54,15 @@ const CODE_TOOLS: Anthropic.Tool[] = [
   },
 ];
 
-/** Simple local tool executor (code analysis is done by Claude itself) */
-function executeTool(name: string, input: Record<string, string>): string {
-  // These tools are meta-tools — Claude answers them from its own knowledge
+/** Meta-tool executor — Claude answers from its own knowledge */
+function executeTool(name: string, input: Record<string, unknown>): string {
   switch (name) {
     case "analyze_code":
-      return `Analysing ${input.language} code:\n${input.code}`;
+      return `Analysing ${input.language as string} code:\n${input.code as string}`;
     case "generate_code":
-      return `Generating ${input.language} code for: ${input.description}`;
+      return `Generating ${input.language as string} code for: ${input.description as string}`;
     case "explain_code":
-      return `Explaining code:\n${input.code}`;
+      return `Explaining code:\n${input.code as string}`;
     default:
       return "Unknown tool";
   }
@@ -73,75 +70,29 @@ function executeTool(name: string, input: Record<string, string>): string {
 
 export async function runCodeAgent(
   task: string,
-  transcript: TranscriptWriter
+  transcript: TranscriptWriter,
+  provider: AIProvider
 ): Promise<string> {
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: task },
-  ];
-
   const turnStart = Date.now();
-  let finalText = "";
 
-  while (true) {
-    const stream = client.messages.stream({
-      model: "claude-opus-4-6",
-      max_tokens: 8192,
-      thinking: { type: "adaptive" },
-      system:
-        "You are an expert software engineer agent. Analyse, generate, and explain code with precision. Use the provided tools to structure your work. Produce clean, well-documented output.",
-      tools: CODE_TOOLS,
-      messages,
-    });
+  const finalText = await provider.runAgent({
+    system:
+      "You are an expert software engineer agent. Analyse, generate, and explain code with precision. Use the provided tools to structure your work. Produce clean, well-documented output.",
+    task,
+    tools: CODE_TOOLS,
+    executeTool,
+    maxTokens: 8192,
+    logPrefix: "[CodeAgent] ",
+    onToolUse: (id, name, input) => {
+      transcript.writeToolUse(id, name, input);
+    },
+    onToolResult: (id, result) => {
+      transcript.writeToolResult(id, result);
+    },
+  });
 
-    process.stdout.write("[CodeAgent] ");
-    for await (const event of stream) {
-      if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta"
-      ) {
-        process.stdout.write(event.delta.text);
-      }
-    }
-
-    const response = await stream.finalMessage();
-
-    if (response.stop_reason === "end_turn") {
-      const textBlock = response.content.find((b) => b.type === "text");
-      finalText = textBlock?.type === "text" ? textBlock.text : "";
-      transcript.writeAssistantText(finalText);
-      transcript.writeTurnEnd(Date.now() - turnStart);
-      process.stdout.write("\n");
-      break;
-    }
-
-    if (response.stop_reason === "tool_use") {
-      const toolUseBlocks = response.content.filter(
-        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
-      );
-
-      for (const tb of toolUseBlocks) {
-        const toolId = uuidv4().slice(0, 24);
-        transcript.writeToolUse(
-          toolId,
-          tb.name,
-          tb.input as Record<string, unknown>
-        );
-        const result = executeTool(tb.name, tb.input as Record<string, string>);
-        transcript.writeToolResult(toolId, result);
-      }
-
-      messages.push({ role: "assistant", content: response.content });
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = toolUseBlocks.map(
-        (tb) => ({
-          type: "tool_result",
-          tool_use_id: tb.id,
-          content: executeTool(tb.name, tb.input as Record<string, string>),
-        })
-      );
-      messages.push({ role: "user", content: toolResults });
-    }
-  }
+  transcript.writeAssistantText(finalText);
+  transcript.writeTurnEnd(Date.now() - turnStart);
 
   return finalText;
 }

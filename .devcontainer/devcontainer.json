@@ -15,6 +15,13 @@
     }
   },
   "remoteEnv": {
-    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+    "AI_PROVIDER": "${localEnv:AI_PROVIDER}",
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+    "OPENAI_MODEL": "${localEnv:OPENAI_MODEL}",
+    "OLLAMA_BASE_URL": "${localEnv:OLLAMA_BASE_URL}",
+    "OLLAMA_MODEL": "${localEnv:OLLAMA_MODEL}",
+    "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+    "GEMINI_MODEL": "${localEnv:GEMINI_MODEL}"
   }
 }

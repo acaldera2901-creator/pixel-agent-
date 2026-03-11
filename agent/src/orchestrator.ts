@@ -2,7 +2,7 @@
  * Orchestrator — main multi-task coordinator.
  *
  * 1. Receives a high-level task from the user.
- * 2. Uses Claude to classify and plan the task into sub-tasks.
+ * 2. Uses the configured AI provider to classify and plan the task into sub-tasks.
  * 3. Delegates each sub-task to the appropriate specialist agent
  *    (fileAgent, searchAgent, codeAgent).
  * 4. Logs every delegation as a "Task" tool_use in the JSONL transcript
@@ -10,14 +10,13 @@
  * 5. Returns the combined results.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuidv4 } from "uuid";
 import { TranscriptWriter } from "./transcript.js";
 import { runFileAgent } from "./agents/fileAgent.js";
 import { runSearchAgent } from "./agents/searchAgent.js";
 import { runCodeAgent } from "./agents/codeAgent.js";
-
-const client = new Anthropic();
+import { getProvider, AIProvider } from "./providers/index.js";
+import { getConfig } from "./config.js";
 
 type AgentType = "file" | "search" | "code" | "general";
 
@@ -32,8 +31,12 @@ interface Plan {
   subtasks: SubTask[];
 }
 
-/** Ask Claude to decompose a user request into typed sub-tasks */
-async function planTask(userTask: string, transcript: TranscriptWriter): Promise<Plan> {
+/** Ask the AI provider to decompose a user request into typed sub-tasks */
+async function planTask(
+  userTask: string,
+  transcript: TranscriptWriter,
+  provider: AIProvider
+): Promise<Plan> {
   const planToolId = uuidv4().slice(0, 24);
 
   transcript.writeToolUse(planToolId, "Task", {
@@ -41,10 +44,7 @@ async function planTask(userTask: string, transcript: TranscriptWriter): Promise
     task: userTask,
   });
 
-  const response = await client.messages.create({
-    model: "claude-opus-4-6",
-    max_tokens: 2048,
-    thinking: { type: "adaptive" },
+  const raw = await provider.complete({
     system: `You are an orchestration planner. Given a user task, decompose it into subtasks and assign each to the most appropriate specialist agent:
 - "file": reading, writing, listing, or analysing files and directories
 - "search": web research, fact-finding, current events, looking up information
@@ -63,16 +63,9 @@ Respond with a JSON object matching this exact schema:
 }
 
 Keep subtasks focused. Use 1-3 subtasks unless the request genuinely requires more.`,
-    messages: [
-      {
-        role: "user",
-        content: `Decompose this task into subtasks:\n\n${userTask}`,
-      },
-    ],
+    userMessage: `Decompose this task into subtasks:\n\n${userTask}`,
+    maxTokens: 2048,
   });
-
-  const textBlock = response.content.find((b) => b.type === "text");
-  const raw = textBlock?.type === "text" ? textBlock.text : "{}";
 
   // Extract JSON from the response (may be wrapped in markdown code blocks)
   const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) ?? [null, raw];
@@ -82,26 +75,27 @@ Keep subtasks focused. Use 1-3 subtasks unless the request genuinely requires mo
   try {
     plan = JSON.parse(jsonStr) as Plan;
   } catch {
-    // Fallback: treat as a single general task for codeAgent
     plan = {
       summary: userTask,
       subtasks: [{ agent: "general", description: userTask, task: userTask }],
     };
   }
 
-  transcript.writeToolResult(planToolId, `Plan created: ${plan.summary} (${plan.subtasks.length} subtask(s))`);
+  transcript.writeToolResult(
+    planToolId,
+    `Plan created: ${plan.summary} (${plan.subtasks.length} subtask(s))`
+  );
 
   return plan;
 }
 
 async function runSubAgent(
   subTask: SubTask,
-  transcript: TranscriptWriter
+  transcript: TranscriptWriter,
+  provider: AIProvider
 ): Promise<string> {
   const taskToolId = uuidv4().slice(0, 24);
 
-  // Write the "Task" delegation to the transcript — this is what pixel-agents
-  // picks up to show a sub-agent character in the office
   transcript.writeToolUse(taskToolId, "Task", {
     description: subTask.description,
     agent_type: subTask.agent,
@@ -111,19 +105,22 @@ async function runSubAgent(
   let result: string;
   switch (subTask.agent) {
     case "file":
-      result = await runFileAgent(subTask.task, transcript);
+      result = await runFileAgent(subTask.task, transcript, provider);
       break;
     case "search":
-      result = await runSearchAgent(subTask.task, transcript);
+      result = await runSearchAgent(subTask.task, transcript, provider);
       break;
     case "code":
     case "general":
     default:
-      result = await runCodeAgent(subTask.task, transcript);
+      result = await runCodeAgent(subTask.task, transcript, provider);
       break;
   }
 
-  transcript.writeToolResult(taskToolId, result.slice(0, 500) + (result.length > 500 ? "…" : ""));
+  transcript.writeToolResult(
+    taskToolId,
+    result.slice(0, 500) + (result.length > 500 ? "…" : "")
+  );
   return result;
 }
 
@@ -131,7 +128,8 @@ async function runSubAgent(
 async function summarise(
   userTask: string,
   results: { description: string; result: string }[],
-  transcript: TranscriptWriter
+  transcript: TranscriptWriter,
+  provider: AIProvider
 ): Promise<string> {
   const summaryToolId = uuidv4().slice(0, 24);
   transcript.writeToolUse(summaryToolId, "Task", {
@@ -142,22 +140,12 @@ async function summarise(
     .map((r, i) => `### Sub-task ${i + 1}: ${r.description}\n${r.result}`)
     .join("\n\n");
 
-  const response = await client.messages.create({
-    model: "claude-opus-4-6",
-    max_tokens: 4096,
-    thinking: { type: "adaptive" },
+  const summary = await provider.complete({
     system:
       "You are a synthesis expert. Given the original task and results from multiple specialist agents, produce a clear, comprehensive final answer. Integrate all information naturally.",
-    messages: [
-      {
-        role: "user",
-        content: `Original task: ${userTask}\n\nSub-task results:\n${resultsText}\n\nPlease synthesise a final comprehensive answer.`,
-      },
-    ],
+    userMessage: `Original task: ${userTask}\n\nSub-task results:\n${resultsText}\n\nPlease synthesise a final comprehensive answer.`,
+    maxTokens: 4096,
   });
-
-  const textBlock = response.content.find((b) => b.type === "text");
-  const summary = textBlock?.type === "text" ? textBlock.text : "(no summary)";
 
   transcript.writeAssistantText(summary);
   transcript.writeToolResult(summaryToolId, "Synthesis complete");
@@ -168,18 +156,22 @@ async function summarise(
 
 export class Orchestrator {
   private transcript: TranscriptWriter;
+  private providerPromise: Promise<AIProvider>;
 
   constructor() {
     this.transcript = new TranscriptWriter(process.cwd());
     this.transcript.writeInit();
+    this.providerPromise = getProvider(getConfig());
   }
 
   async run(userTask: string): Promise<string> {
-    console.log(`\n🎯 Task: ${userTask}\n`);
+    const provider = await this.providerPromise;
+    console.log(`\n🎯 Task: ${userTask}`);
+    console.log(`   Provider: ${provider.name}\n`);
 
     // 1. Plan
     console.log("🗺️  Planning sub-tasks...");
-    const plan = await planTask(userTask, this.transcript);
+    const plan = await planTask(userTask, this.transcript, provider);
     console.log(`   → ${plan.summary}`);
     console.log(`   → ${plan.subtasks.length} sub-task(s)\n`);
 
@@ -190,13 +182,13 @@ export class Orchestrator {
       console.log(
         `\n[${i + 1}/${plan.subtasks.length}] 🤖 ${subTask.description} (${subTask.agent} agent)`
       );
-      const result = await runSubAgent(subTask, this.transcript);
+      const result = await runSubAgent(subTask, this.transcript, provider);
       results.push({ description: subTask.description, result });
     }
 
     // 3. Synthesise
     console.log("\n✨ Synthesising final answer...\n");
-    const finalAnswer = await summarise(userTask, results, this.transcript);
+    const finalAnswer = await summarise(userTask, results, this.transcript, provider);
 
     return finalAnswer;
   }
