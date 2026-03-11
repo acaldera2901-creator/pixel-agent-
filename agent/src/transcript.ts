@@ -12,10 +12,13 @@ import os from "os";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 
-/** Sanitize a filesystem path to the format Claude Code uses for project dirs */
+/** Sanitize a filesystem path to the format Claude Code uses for project dirs.
+ *  Replicates agentManager.ts getProjectDirPath() exactly:
+ *    workspacePath.replace(/[^a-zA-Z0-9-]/g, '-')
+ *  e.g. /home/user/pixel-agent- → -home-user-pixel-agent-
+ */
 function sanitizePath(dir: string): string {
-  // Claude Code replaces path separators with dashes and strips leading slash
-  return dir.replace(/^\//, "").replace(/\//g, "-");
+  return dir.replace(/[^a-zA-Z0-9-]/g, "-");
 }
 
 export class TranscriptWriter {
